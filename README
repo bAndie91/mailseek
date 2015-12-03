@@ -1,0 +1,28 @@
+Usage: ./mailseek [options] [files]
+Options:
+  --no-recursive   Do not dive into directories, default is recursive
+  --case           Case sensitive match, default is case insensitive
+  --any            Succeed if any criterium matches, by default all criteria
+                   must match
+  --verbose        Provide verbose output on STDERR
+  --debug          Provide debug output on STDERR
+  --null           Separate file names by NUL chars, default is newline
+  --details        Print some headers, not only the file name
+Filter options:
+  --newer DATETIME, --older DATETIME        Filter by date and time
+  --filetime               Date-time filtering is based on file's time, not
+                           on Email's Date header (faster)
+  --sender PATTERN         From, Sender, Originator, Return-Path headers
+  --recipient PATTERN      To, Cc, Bcc, Delivered-To headers
+  --subject PATTERN        The Subject header
+  --attachment PATTERN     Search in name of attachments (Email parts)
+  --mime PATTERN/PATTERN   MIME type (type/subtype) of Email parts
+  --header NAME:PATTERN    Search in the named header
+  --body QUERY             Body text (plain text and html are supported)
+Formats:
+  DATETIME    "YYYY-mm-dd_HH:MM:SS" - meant in current time zone
+              You can omit any elements only from the right
+  PATTERN     a) simple string - match case insensitive substring
+              b) "~REGEX" - match as regexp if PATTERN starts with tilde
+              PATTERN is optionally prefixed by '!' which inverts filtering
+  QUERY       Fulltext search expression, see Search::Fulltext(3pm)
