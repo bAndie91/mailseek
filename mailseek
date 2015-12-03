@@ -1,0 +1,605 @@
+#!/usr/bin/env perl
+
+use warnings;
+no if ($] >= 5.018), 'warnings' => 'experimental';
+use feature qw/switch/;
+use Email::MIME;
+use Email::MIME::Encodings;
+use Encode qw/encode decode/;
+use MIME::Base64;
+use POSIX qw/mktime/;
+use Data::Dumper;
+use utf8;
+use Getopt::Long;
+use Time::Local;
+use Search::Fulltext;
+use HTML::Entities;
+use Carp;
+use constant {TRUE => 1, FALSE => 0};
+use constant {STAT_DEVNO=>0, STAT_INO=>1, STAT_MODE=>2, STAT_LINKS=>3, STAT_UID=>4, STAT_GID=>5, STAT_DEVIDENT=>6, STAT_SIZE=>7, STAT_ATIME=>8, STAT_MTIME=>9, STAT_CTIME=>10, STAT_PREFBLKSZ=>11, STAT_BLOCKS=>12};
+use constant {PW_NAME=>0, PW_UID=>2, PW_PGID=>3, PW_GECOS=>6, PW_HOME=>7, PW_SHELL=>8};
+
+# ==============================
+
+$Recursive = 1;
+$Any = 0;
+$Separator = "\n";
+$Debug = 0;
+$Verbose = 0;
+$CaseSensitive = 0;
+$Details = 0;
+
+$n = 0;
+%FilterPrio = map { $_=>$n++; } qw/date sndr rcpt subj head atta mime body/;
+$n = 1;
+%Monthname = map { $_=>$n++; } qw/Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec/;
+undef $n;
+%FilterName = ("date", "Date", "sndr", "Sender", "rcpt", "Recipient", "subj", "Subject", 
+	"atta", "Attachment name", "mime", "MIME type", "body", "Body text", "head", "%s header");
+
+@t = localtime(time);
+$local_GMT_offset = timegm(@t) - timelocal(@t);
+undef @t;
+
+$ANSI_BOLD = "\033[;1m";
+$ANSI_NORM = "\033[;m";
+
+$SIG{__DIE__} = sub{ Carp::confess(@_) };
+
+# ==============================
+
+sub err
+{
+	my $str = join('', @_);
+	$str =~ s/\n*$/\n/;
+	print STDERR $str;
+}
+sub dbg { err @_ if $Debug; }
+sub vrb { err @_ if $Verbose; }
+
+
+sub get_parts_recursive
+{
+	my $obj = shift;
+	my @return;
+	my $part = {
+		mime => {
+			type => $obj->{ct}->{type}||$obj->{ct}->{discrete},
+			subtype => $obj->{ct}->{subtype}||$obj->{ct}->{composite},
+		},
+		name => $obj->filename,
+		partref => \$obj,
+	};
+	push @return, $part;
+	for my $subpart ($obj->subparts)
+	{
+		push @return, get_parts_recursive($subpart);
+	}
+	return @return;
+}
+
+sub fmt_structure
+{
+	my $obj = shift;
+	my $indent = shift || 0;
+	my @return;
+	my $part = (" "x$indent) . "+ " . ($obj->{ct}->{type}||$obj->{ct}->{discrete})."/".($obj->{ct}->{subtype}||$obj->{ct}->{composite});
+	if(defined $obj->filename)
+	{
+		my $_ = $obj->filename;
+		s/[""]/\\$&/g;
+		$part .= "; name=\"$_\"";
+	}
+	push @return, $part;
+	for my $subpart ($obj->subparts)
+	{
+		push @return, fmt_structure($subpart, $indent+5);
+	}
+	return @return;
+}
+
+sub get_part_body
+{
+	my $part = shift;
+	my $text;
+	my $enc = ${$part->{"partref"}}->{ct}->{attributes}->{charset};
+	
+	given($part->{"mime"}->{"type"}."/".$part->{"mime"}->{"subtype"})
+	{
+		when("text/plain")
+		{
+			$text = ${$part->{"partref"}}->body();
+			if($FilterBodyQuotes)
+			{
+				$text =~ s/^>.*\n//mg;
+			}
+		}
+		when("text/html")
+		{
+			$text = ${$part->{"partref"}}->body();
+			$text =~ s{<(style|script)\b.*?(</(?1)\b.*>)}{}gis;
+			$text =~ s{</?(td|tr|th|table|form|img|br|hr|p)\b.*?>}{ }g;
+			$text =~ s{<.*?>}{}g;
+			if($FilterBodyQuotes)
+			{
+				$text =~ s{<blockquote\b.*?(</blockquote.*?>)}{}mgi;
+			}
+			HTML::Entities::decode($text);
+		}
+	}
+	if(defined $enc)
+	{
+		$text = safe_reencode($text, $enc);
+	}
+	return $text;
+}
+
+sub capitalize
+{
+	$_[0] =~ s/\b(\w+)\b/\L\u$1/g;
+	return $_[0];
+}
+
+sub fmt_snippet
+{								
+	my $snippet = shift;
+	$snippet =~ s/[\r\n]*$//;
+	$snippet =~ s/\s+/ /gs;
+	$snippet =~ s/<b>/$ANSI_BOLD/g;
+	$snippet =~ s/<\/b>/$ANSI_NORM/g;
+	return $snippet;
+}
+
+sub is_match($$)
+{
+	my $a = shift || "";
+	my $b = shift || "";
+	my $match;
+	my $negate = ($b =~ s/^!//);
+	if($b =~ s/^~//)
+	{
+		$match = ($a =~ /$b/);
+	}
+	else
+	{
+		$match = (index($a, $b) >= 0);
+	}
+	$match = !$match if $negate;
+	return $match;
+}
+
+sub lc_array
+{
+	my $aref = shift;
+	for my $idx (0..$#$aref)
+	{
+		given(ref $aref->[$idx])
+		{
+			when('')
+			{
+				$aref->[$idx] = lc $aref->[$idx];
+			}
+			when('ARRAY')
+			{
+				$aref->[$idx]->[0] = lc $aref->[$idx]->[0];
+			}
+		}
+	}
+}
+
+sub safe_reencode
+{
+	my $str = shift;
+	my $from = shift || 'MIME-Header';
+	my $dec;
+	if(eval{ $SIG{__DIE__} = undef; $dec = decode($from, $str); 1; })
+	{
+		return encode('utf8', $dec);
+	}
+	else
+	{
+		print STDERR $@;
+	}
+	return $str;
+}
+
+sub sort_header_names_by_display_prio
+{
+	my $n = 1;
+	my %prio = map {$_ => $n++} qw/Return-Path From Sender X-Sender To Cc Bcc Delivered-To Subject Date Delivered-Date/;
+	my %hdrs = map {$_ => $n++} sort @_;
+	return sort {($prio{$a}||$hdrs{$a}) <=> ($prio{$b}||$hdrs{$b})} keys %hdrs;
+}
+
+sub push_headers
+{
+	my $aref = shift;
+	my $msgref = shift;
+	for my $hdr (@_)
+	{
+		if(my $cnt = $msgref->header($hdr))
+		{
+			push @$aref, [$cnt, $hdr];
+		}
+	}
+}
+
+sub between_datetime
+{
+	my $date = shift;
+	my $bounds = shift;
+	return ((not defined $bounds->{"start"} or $date ge $bounds->{"start"}) and 
+	        (not defined $bounds->{"end"}   or $date le $bounds->{"end"}));
+}
+
+sub mailseek
+{
+	my @recur;
+	for my $file (@_)
+	{
+		if(-d $file)
+		{
+			push @recur, glob "$file/*" if $Recursive;
+			next;
+		}
+
+		if($FilterFileTime and (defined $Filter->{'date'}->{'start'} or defined $Filter->{'date'}->{'end'}))
+		{
+			my($mtime) = ((stat $file)[STAT_MTIME]);
+			if(not between_datetime($mtime, $Filter->{'date'}))
+			{
+				vrb $file, ": not matched by file mtime";
+				next;
+			}
+		}
+
+		my $rawmail;
+		my $fh;
+		if(not open $fh, '<', $file)
+		{
+			warn "$!: $file\n";
+			next;
+		}
+		while(<$fh>)
+		{
+			if($seek_only_in_headers and /^\r*$/)
+			{
+				last;
+			}
+			$rawmail .= $_;
+		}
+		close $fh;
+		
+		my $Msg = Email::MIME->new($rawmail);
+		undef $rawmail;
+		dbg Dumper "Email:", $Msg;
+		
+
+		my $is_found = 0;
+		my @Parts;
+		my $ftsearch;
+		my @bodies;
+		my %matched_parts;
+		my @found_headers;
+
+		for my $key (sort {$FilterPrio{substr($a, 0, 4)} <=> $FilterPrio{substr($b, 0, 4)}} grep {defined $Filter->{$_}} keys $Filter)
+		{
+			my $this_found = 0;
+			my $values = $Filter->{$key};
+			my $head_name;
+
+			if($key =~ /^head(.*)/)
+			{
+				$key = "head";
+				$head_name = $1;
+				$head_name = capitalize $head_name;
+			}
+
+			if($key eq "date")
+			{
+				next if(not grep {defined $_} values $values);
+				my @dates;
+				for($Msg->header("Received"), $Msg->header("Date"), $Msg->header("Delivery-Date"))
+				{
+					if(/(?'day'\d+) (?'monthname'\w{3})\w? (?'year'\w{4}) (?'hour'\d\d):(?'min'\d\d):(?'sec'\d\d) (?'tz'[\+-]\d+)/)
+					{
+						my $month = $Monthname{$+{monthname}};
+						push @dates, mktime($+{sec} || 0, $+{min} || 0, $+{hour} || 0, $+{day} || 1, ($month || 1)-1, $+{year}-1900) - ($+{tz} * 60);
+					}
+				}
+				for my $date (@dates)
+				{
+					if(between_datetime($date, $values))
+					{
+						$this_found = 1;
+						last;
+					}
+				}
+			}
+			else
+			{
+				my @fields;
+				my @fields_encoded;
+				
+				if(!@Parts and grep {$key eq $_} qw/atta mime body/)
+				{
+					@Parts = get_parts_recursive($Msg);
+				}
+				
+				given($key)
+				{
+					when("sndr")
+					{
+						push_headers(\@fields, $Msg, "Return-Path");
+						push_headers(\@fields_encoded, $Msg, qw/From Sender X-Sender/);
+						for($Msg->header("Received"))
+						{
+							if(/envelope-from <?([a-z0-9@\._-]+)/i)
+							{
+								push @fields, [$1, undef];
+							}
+						}
+					}
+					when("rcpt")
+					{
+						push_headers(\@fields, $Msg, "Delivered-To");
+						push_headers(\@fields_encoded, $Msg, qw/To Cc Bcc/);
+						for($Msg->header("Received"))
+						{
+							if(/\bfor <?([a-z0-9@\._-]+)/i)
+							{
+								push @fields, [$1, undef];
+							}
+						}
+					}
+					when("subj")
+					{
+						push_headers(\@fields_encoded, $Msg, "Subject");
+					}
+					when("atta")
+					{
+						push @fields, [$_->{"name"}, undef] for grep {defined $_->{"name"}} @Parts;
+					}
+					when("mime")
+					{
+						push @fields, $_->{"mime"} for @Parts;
+					}
+					when("head")
+					{
+						push_headers(\@fields_encoded, $Msg, $head_name);
+					}
+				}
+				
+				for my $elem (@fields_encoded)
+				{
+					my $content = shift @$elem;
+					push @fields, [safe_reencode($content), @$elem];
+				}
+				undef @fields_encoded;
+				if(!$CaseSensitive and $key ne "body")
+				{
+					lc_array($values);
+					lc_array(\@fields);
+				}
+				
+				dbg Dumper "Fields:", \@fields;
+				
+				
+				TEST_VALUES:
+				for my $value (@$values)
+				{
+					if($key eq "body")
+					{
+						if(not defined $ftsearch)
+						{
+							@bodies = map {get_part_body($_)} @Parts;
+							eval {
+								$ftsearch = Search::Fulltext->new({docs => \@bodies});
+							};
+							undef @bodies;
+						}
+						if(defined $ftsearch)
+						{
+							%matched_parts = @{$ftsearch->search_snippets($value)};
+							$this_found = scalar keys %matched_parts > 0;
+						}
+					}
+					else
+					{
+						for my $ref (@fields)
+						{
+							if($key eq "mime")
+							{
+								my($type, $subtype) = split /\//, $value;
+								if(is_match($ref->{"type"}, $type) and is_match($ref->{"subtype"}, $subtype)) { $this_found = 1; }
+							}
+							else
+							{
+								my($fld_cnt, $fld_name) = @$ref;
+								if(is_match($fld_cnt, $value))
+								{
+									$this_found = 1;
+									push @found_headers, capitalize($fld_name) if defined $fld_name;
+								}
+							}
+							last TEST_VALUES if $this_found;
+						}
+					}
+				}
+			}
+
+			my $matchedby = $FilterName{$key};
+			if($key eq "head")
+			{
+				$matchedby = sprintf $matchedby, $head_name;
+			}
+			vrb $file, ": ", $this_found ? "" : "not ", "matched by $matchedby";
+			$is_found = $this_found;
+			
+			if(($Any and $this_found) or (!$Any and !$this_found))
+			{
+				last;
+			}
+		}
+		
+		if($is_found)
+		{
+			$overall_hits++;
+			print "$file$Separator";
+
+			if($Details)
+			{
+				for my $hdr (sort_header_names_by_display_prio(qw/From To Subject Date/, @found_headers))
+				{
+					my @cont;
+					for my $cont ($Msg->header($hdr))
+					{
+						if(length $cont)
+						{
+							if(!grep {$_ eq $cont} @cont)
+							{
+								push @cont, $cont;
+								$cont = safe_reencode($cont);
+								print "$hdr: $cont\n";
+							}
+						}
+					}
+				}
+
+				if(!$seek_only_in_headers)
+				{
+					if($seek_in_subheaders)
+					{
+						my $ln = 0;
+						for my $line (fmt_structure($Msg))
+						{
+							if(exists $matched_parts{$ln})
+							{
+								my($pre, $typ, $rst) = ($line =~ /^(\s*\S+\s+)([^;]+)(.*)/);
+								printf "%s%s%s%s%s\n%s%s\n", $pre, $ANSI_BOLD, $typ, $ANSI_NORM, $rst,
+									" " x length $pre, fmt_snippet($matched_parts{$ln}->[0]);
+							}
+							else
+							{
+								print "$line\n";
+							}
+							$ln++;
+						}
+					}
+					else
+					{
+						for my $prt (sort keys %matched_parts)
+						{
+							print "\t", fmt_snippet($matched_parts{$prt}->[0]), "\n";
+						}
+					}
+				}
+				print $Separator;
+			}
+		}
+	}
+	
+	if(@recur)
+	{
+		mailseek(@recur);
+	}
+}
+
+
+# ==============================
+
+if(!GetOptions(
+	'recursive!' => \$Recursive,
+	'case!' => \$CaseSensitive,
+	'any' => \$Any,
+	'null' => sub { $Separator = "\0"; },
+	'debug' => \$Debug,
+	'verbose' => \$Verbose,
+	'details' => \$Details,
+	
+	'newer=s' => \$Filter->{'date'}->{'start'},
+	'older=s' => \$Filter->{'date'}->{'end'},
+	'filetime!' => \$FilterFileTime,
+	'sndr|sender=s@' => \$Filter->{'sndr'},
+	'rcpt|recipient=s@' => \$Filter->{'rcpt'} ,
+	'subject=s@' => \$Filter->{'subj'},
+	'body=s@' => \$Filter->{'body'},
+	'attachment=s@' => \$Filter->{'atta'},
+	'mime=s@' => \$Filter->{'mime'},
+	'header=s@' => sub { my($name, $patt) = split /:/, $_[1], 2; push @{$Filter->{"head$name"}}, $patt; },
+))
+{
+print "Usage: $0 [options] [files]
+Options:
+  --no-recursive   Do not dive into directories, default is recursive
+  --case           Case sensitive match, default is case insensitive
+  --any            Succeed if any criterium matches, by default all criteria
+                   must match
+  --verbose        Provide verbose output on STDERR
+  --debug          Provide debug output on STDERR
+  --null           Separate file names by NUL chars, default is newline
+  --details        Print some headers, not only the file name
+Filter options:
+  --newer DATETIME, --older DATETIME        Filter by date and time
+  --filetime               Date-time filtering is based on file's time, not
+                           on Email's Date header (faster)
+  --sender PATTERN         From, Sender, Originator, Return-Path headers
+  --recipient PATTERN      To, Cc, Bcc, Delivered-To headers
+  --subject PATTERN        The Subject header
+  --attachment PATTERN     Search in name of attachments (Email parts)
+  --mime PATTERN/PATTERN   MIME type (type/subtype) of Email parts
+  --header NAME:PATTERN    Search in the named header
+  --body QUERY             Body text (plain text and html are supported)
+Formats:
+  DATETIME    \"YYYY-mm-dd_HH:MM:SS\" - meant in current time zone
+              You can omit any elements only from the right
+  PATTERN     a) simple string - match case insensitive substring
+              b) \"~REGEX\" - match as regexp if PATTERN starts with tilde
+              PATTERN is optionally prefixed by '!' which inverts filtering
+  QUERY       Fulltext search expression, see Search::Fulltext(3pm)
+";
+exit 1;
+}
+
+
+dbg Dumper "Filters:", $Filter;
+
+
+# Check options
+for my $key (keys %{$Filter->{'date'}})
+{
+	my $ref = \$Filter->{'date'}->{$key};
+	if(defined $$ref)
+	{
+		if($$ref =~ /^(?'year'\d\d\d\d)(?:-(?'month'\d\d)(?:-(?'day'\d\d)(?:[T_ ](?'hour'\d\d)(?::(?'min'\d\d)(?::(?'sec'\d\d))?)?)?)?)?$/)
+		{
+			$$ref = mktime($+{sec} || 0, $+{min} || 0, $+{hour} || 0, $+{day} || 1, ($+{month} || 1)-1, $+{year}-1900);
+		}
+		elsif($$ref !~ /^\d+$/)
+		{
+			warn "Invalid date: $$ref\n";
+			exit 255;
+		}
+		
+		# Adjust local timezone to UTC.
+		$$ref -= $local_GMT_offset;
+	}
+}
+
+
+$seek_only_in_headers = not(defined $Filter->{'body'} or defined $Filter->{'atta'} or defined $Filter->{'mime'});
+$seek_in_subheaders = (defined $Filter->{'atta'} or defined $Filter->{'mime'});
+$overall_hits = 0;
+
+# Main
+if(not @ARGV)
+{
+	@ARGV = (".");
+}
+mailseek(@ARGV);
+
+if($overall_hits == 0)
+{
+	vrb "Nothing found.";
+	exit 1;
+}
