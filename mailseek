@@ -1,5 +1,6 @@
 #!/usr/bin/env perl
 
+use utf8;
 use warnings;
 no if ($] >= 5.018), 'warnings' => 'experimental';
 use feature qw/switch/;
@@ -8,12 +9,11 @@ use Email::MIME::Encodings;
 use Encode qw/encode decode/;
 use MIME::Base64;
 use POSIX qw/mktime/;
-use Data::Dumper;
-use utf8;
-use Getopt::Long;
 use Time::Local;
+use Getopt::Long;
 use Search::Fulltext;
 use HTML::Entities;
+use Data::Dumper;
 use Carp;
 use constant {TRUE => 1, FALSE => 0};
 use constant {STAT_DEVNO=>0, STAT_INO=>1, STAT_MODE=>2, STAT_LINKS=>3, STAT_UID=>4, STAT_GID=>5, STAT_DEVIDENT=>6, STAT_SIZE=>7, STAT_ATIME=>8, STAT_MTIME=>9, STAT_CTIME=>10, STAT_PREFBLKSZ=>11, STAT_BLOCKS=>12};
@@ -235,12 +235,22 @@ sub between_datetime
 sub mailseek
 {
 	my @recur;
+	READFILE:
 	for my $file (@_)
 	{
 		if(-d $file)
 		{
-			push @recur, glob "$file/*" if $Recursive;
-			next;
+			if($Recursive)
+			{
+				my $dirhnd;
+				opendir $dirhnd, $file;
+				while(my $entry = readdir $dirhnd)
+				{
+					push @recur, $file . '/' . $entry if $entry !~ /^\.\.?$/;
+				}
+				close $dirhnd;
+			}
+			next READFILE;
 		}
 
 		if($FilterFileTime and (defined $Filter->{'date'}->{'start'} or defined $Filter->{'date'}->{'end'}))
@@ -249,7 +259,7 @@ sub mailseek
 			if(not between_datetime($mtime, $Filter->{'date'}))
 			{
 				vrb $file, ": not matched by file mtime";
-				next;
+				next READFILE;
 			}
 		}
 
@@ -258,23 +268,40 @@ sub mailseek
 		if(not open $fh, '<', $file)
 		{
 			warn "$!: $file\n";
-			next;
+			next READFILE;
 		}
 		while(<$fh>)
 		{
+			if($. == 1 and !/^[\x20-\x7E]+\r?\n$/)
+			{
+				dbg "It does not seem to be a raw email file: $file";
+				close $fh;
+				next READFILE;
+			}
 			if($seek_only_in_headers and /^\r*$/)
 			{
 				last;
 			}
 			$rawmail .= $_;
 		}
+		my $size = tell $fh;
 		close $fh;
+		
+		if($size < 6)
+		{
+			dbg "It is too small to be a raw email file: $file";
+			next READFILE;
+		}
 		
 		my $Msg = Email::MIME->new($rawmail);
 		undef $rawmail;
 		dbg Dumper "Email:", $Msg;
+		if(!@{$Msg->{header}->{headers}})
+		{
+			next READFILE;
+		}
 		
-
+		
 		my $is_found = 0;
 		my @Parts;
 		my $ftsearch;
@@ -526,7 +553,11 @@ if(!GetOptions(
 	'body=s@' => \$Filter->{'body'},
 	'attachment=s@' => \$Filter->{'atta'},
 	'mime=s@' => \$Filter->{'mime'},
-	'header=s@' => sub { my($name, $patt) = split /:/, $_[1], 2; push @{$Filter->{"head$name"}}, $patt; },
+	'header=s@' => sub{
+		my($name, $patt) = split /:/, $_[1], 2;
+		$patt = '~^' unless defined $patt;
+		push @{$Filter->{"head$name"}}, $patt;
+	},
 ))
 {
 print "Usage: $0 [options] [files]
@@ -548,7 +579,7 @@ Filter options:
   --subject PATTERN        The Subject header
   --attachment PATTERN     Search in name of attachments (Email parts)
   --mime PATTERN/PATTERN   MIME type (type/subtype) of Email parts
-  --header NAME:PATTERN    Search in the named header
+  --header NAME[:PATTERN]  Search in the named header
   --body QUERY             Body text (plain text and html are supported)
 Formats:
   DATETIME    \"YYYY-mm-dd_HH:MM:SS\" - meant in current time zone

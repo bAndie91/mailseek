@@ -17,7 +17,7 @@ Filter options:
   --subject PATTERN        The Subject header
   --attachment PATTERN     Search in name of attachments (Email parts)
   --mime PATTERN/PATTERN   MIME type (type/subtype) of Email parts
-  --header NAME:PATTERN    Search in the named header
+  --header NAME[:PATTERN]  Search in the named header
   --body QUERY             Body text (plain text and html are supported)
 Formats:
   DATETIME    "YYYY-mm-dd_HH:MM:SS" - meant in current time zone
