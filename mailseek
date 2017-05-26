@@ -18,6 +18,8 @@ use Carp;
 use constant {TRUE => 1, FALSE => 0};
 use constant {STAT_DEVNO=>0, STAT_INO=>1, STAT_MODE=>2, STAT_LINKS=>3, STAT_UID=>4, STAT_GID=>5, STAT_DEVIDENT=>6, STAT_SIZE=>7, STAT_ATIME=>8, STAT_MTIME=>9, STAT_CTIME=>10, STAT_PREFBLKSZ=>11, STAT_BLOCKS=>12};
 use constant {PW_NAME=>0, PW_UID=>2, PW_PGID=>3, PW_GECOS=>6, PW_HOME=>7, PW_SHELL=>8};
+use constant {MATCH_FULL=>1, MATCH_PARTIAL=>2};
+use constant {MATCH_CASE_ASIS=>1, MATCH_CASE_FORCE_INSENSITIVE=>2};
 
 # ==============================
 
@@ -150,19 +152,44 @@ sub fmt_snippet
 	return $snippet;
 }
 
-sub is_match($$)
+sub is_match($$$$)
 {
+	# arg 1: test string
+	# arg 2: pattern string
+	# arg 3: literal matching mode: MATCH_FULL, MATCH_PARTIAL
+	# arg 4: case sensitivity: MATCH_CASE_ASIS, MATCH_CASE_FORCE_INSENSITIVE
 	my $a = shift || "";
 	my $b = shift || "";
+	my $literal_match_mode = shift || MATCH_PARTIAL;
+	my $case_sensitivity = shift || MATCH_CASE_ASIS;
 	my $match;
 	my $negate = ($b =~ s/^!//);
 	if($b =~ s/^~//)
 	{
-		$match = ($a =~ /$b/);
+		if($case_sensitivity == MATCH_CASE_FORCE_INSENSITIVE)
+		{
+			$match = ($a =~ /$b/i);
+		}
+		else
+		{
+			$match = ($a =~ /$b/);
+		}
 	}
 	else
 	{
-		$match = (index($a, $b) >= 0);
+		if($case_sensitivity == MATCH_CASE_FORCE_INSENSITIVE)
+		{
+			$a = lc $a;
+			$b = lc $b;
+		}
+		if($literal_match_mode == MATCH_PARTIAL)
+		{
+			$match = (index($a, $b) >= 0);
+		}
+		else
+		{
+			$match = ($a eq $b);
+		}
 	}
 	$match = !$match if $negate;
 	return $match;
@@ -187,6 +214,12 @@ sub lc_array
 	}
 }
 
+sub every_1st_of_pairs
+{
+	my $n = 0;
+	return grep {++$n % 2} @_;
+}
+
 sub safe_reencode
 {
 	my $str = shift;
@@ -206,7 +239,7 @@ sub safe_reencode
 sub sort_header_names_by_display_prio
 {
 	my $n = 1;
-	my %prio = map {$_ => $n++} qw/Return-Path From Sender X-Sender To Cc Bcc Delivered-To Subject Date Delivered-Date/;
+	my %prio = map {$_ => $n++} qw/Return-Path From Sender X-Sender To Cc Bcc Delivered-To Subject Thread-Topic Date Delivered-Date/;
 	my %hdrs = map {$_ => $n++} sort @_;
 	return sort {($prio{$a}||$hdrs{$a}) <=> ($prio{$b}||$hdrs{$b})} keys %hdrs;
 }
@@ -217,9 +250,9 @@ sub push_headers
 	my $msgref = shift;
 	for my $hdr (@_)
 	{
-		if(my $cnt = $msgref->header($hdr))
+		if(my $content = $msgref->header($hdr))
 		{
-			push @$aref, [$cnt, $hdr];
+			push @$aref, [$content, $hdr];
 		}
 	}
 }
@@ -309,22 +342,22 @@ sub mailseek
 		my %matched_parts;
 		my @found_headers;
 
-		for my $key (sort {$FilterPrio{substr($a, 0, 4)} <=> $FilterPrio{substr($b, 0, 4)}} grep {defined $Filter->{$_}} keys $Filter)
+		for my $search_key (sort {$FilterPrio{substr($a, 0, 4)} <=> $FilterPrio{substr($b, 0, 4)}} grep {defined $Filter->{$_}} keys $Filter)
 		{
 			my $this_found = 0;
-			my $values = $Filter->{$key};
-			my $head_name;
+			my $search_values = $Filter->{$search_key};
+			my $head_pattern;
+			my $header_name_matched;
 
-			if($key =~ /^head(.*)/)
+			if($search_key =~ /^head(.*)/)
 			{
-				$key = "head";
-				$head_name = $1;
-				$head_name = capitalize $head_name;
+				$search_key = 'head';
+				$head_pattern = $1;
 			}
 
-			if($key eq "date")
+			if($search_key eq 'date')
 			{
-				next if(not grep {defined $_} values $values);
+				next if(not grep {defined $_} values $search_values);
 				my @dates;
 				for($Msg->header("Received"), $Msg->header("Date"), $Msg->header("Delivery-Date"))
 				{
@@ -336,7 +369,7 @@ sub mailseek
 				}
 				for my $date (@dates)
 				{
-					if(between_datetime($date, $values))
+					if(between_datetime($date, $search_values))
 					{
 						$this_found = 1;
 						last;
@@ -348,14 +381,14 @@ sub mailseek
 				my @fields;
 				my @fields_encoded;
 				
-				if(!@Parts and grep {$key eq $_} qw/atta mime body/)
+				if(!@Parts and $search_key ~~ [qw/atta mime body/])
 				{
 					@Parts = get_parts_recursive($Msg);
 				}
 				
-				given($key)
+				given($search_key)
 				{
-					when("sndr")
+					when('sndr')
 					{
 						push_headers(\@fields, $Msg, "Return-Path");
 						push_headers(\@fields_encoded, $Msg, qw/From Sender X-Sender/);
@@ -367,7 +400,7 @@ sub mailseek
 							}
 						}
 					}
-					when("rcpt")
+					when('rcpt')
 					{
 						push_headers(\@fields, $Msg, "Delivered-To");
 						push_headers(\@fields_encoded, $Msg, qw/To Cc Bcc/);
@@ -379,21 +412,27 @@ sub mailseek
 							}
 						}
 					}
-					when("subj")
+					when('subj')
 					{
-						push_headers(\@fields_encoded, $Msg, "Subject");
+						push_headers(\@fields_encoded, $Msg, qw/Subject Thread-Topic/);
 					}
-					when("atta")
+					when('atta')
 					{
-						push @fields, [$_->{"name"}, undef] for grep {defined $_->{"name"}} @Parts;
+						push @fields, [$_->{'name'}, undef] for grep {defined $_->{'name'}} @Parts;
 					}
-					when("mime")
+					when('mime')
 					{
-						push @fields, $_->{"mime"} for @Parts;
+						push @fields, $_->{'mime'} for @Parts;
 					}
-					when("head")
+					when('head')
 					{
-						push_headers(\@fields_encoded, $Msg, $head_name);
+						for my $hname (every_1st_of_pairs @{$Msg->{header}->{headers}})
+						{
+							if(is_match($hname, $head_pattern, MATCH_FULL, MATCH_CASE_FORCE_INSENSITIVE))
+							{
+								push_headers(\@fields_encoded, $Msg, $hname);
+							}
+						}
 					}
 				}
 				
@@ -403,9 +442,9 @@ sub mailseek
 					push @fields, [safe_reencode($content), @$elem];
 				}
 				undef @fields_encoded;
-				if(!$CaseSensitive and $key ne "body")
+				if(!$CaseSensitive and $search_key ne 'body')
 				{
-					lc_array($values);
+					lc_array($search_values);
 					lc_array(\@fields);
 				}
 				
@@ -413,9 +452,9 @@ sub mailseek
 				
 				
 				TEST_VALUES:
-				for my $value (@$values)
+				for my $search_value (@$search_values)
 				{
-					if($key eq "body")
+					if($search_key eq 'body')
 					{
 						if(not defined $ftsearch)
 						{
@@ -427,7 +466,7 @@ sub mailseek
 						}
 						if(defined $ftsearch)
 						{
-							%matched_parts = @{$ftsearch->search_snippets($value)};
+							%matched_parts = @{$ftsearch->search_snippets($search_value)};
 							$this_found = scalar keys %matched_parts > 0;
 						}
 					}
@@ -435,18 +474,25 @@ sub mailseek
 					{
 						for my $ref (@fields)
 						{
-							if($key eq "mime")
+							if($search_key eq 'mime')
 							{
-								my($type, $subtype) = split /\//, $value;
-								if(is_match($ref->{"type"}, $type) and is_match($ref->{"subtype"}, $subtype)) { $this_found = 1; }
+								my($type, $subtype) = split /\//, $search_value;
+								if(is_match($ref->{"type"}, $type, MATCH_PARTIAL, MATCH_CASE_ASIS) and is_match($ref->{"subtype"}, $subtype, MATCH_PARTIAL, MATCH_CASE_ASIS))
+								{
+									$this_found = 1;
+								}
 							}
 							else
 							{
-								my($fld_cnt, $fld_name) = @$ref;
-								if(is_match($fld_cnt, $value))
+								my($fld_content, $fld_name) = @$ref;
+								if(is_match($fld_content, $search_value, MATCH_PARTIAL, MATCH_CASE_ASIS))
 								{
 									$this_found = 1;
 									push @found_headers, capitalize($fld_name) if defined $fld_name;
+									if($search_key eq 'head')
+									{
+										$header_name_matched = $fld_name;
+									}
 								}
 							}
 							last TEST_VALUES if $this_found;
@@ -455,10 +501,10 @@ sub mailseek
 				}
 			}
 
-			my $matchedby = $FilterName{$key};
-			if($key eq "head")
+			my $matchedby = $FilterName{$search_key};
+			if($search_key eq 'head')
 			{
-				$matchedby = sprintf $matchedby, $head_name;
+				$matchedby = sprintf $matchedby, defined $header_name_matched ? capitalize $header_name_matched : 'any';
 			}
 			vrb $file, ": ", $this_found ? "" : "not ", "matched by $matchedby";
 			$is_found = $this_found;
@@ -563,31 +609,38 @@ if(!GetOptions(
 print "Usage: $0 [options] [files]
 Options:
   --no-recursive   Do not dive into directories, default is recursive
-  --case           Case sensitive match, default is case insensitive
-  --any            Succeed if any criterium matches, by default all criteria
-                   must match
   --verbose        Provide verbose output on STDERR
   --debug          Provide debug output on STDERR
   --null           Separate file names by NUL chars, default is newline
   --details        Print some headers, not only the file name
+  --case           Case sensitive match, default is case insensitive
+  --any            Succeed if any criterion matches,
+                   by default all criteria must match
+  --filetime       Date-time filtering is based on file's mtime,
+                   not on Email headers (faster)
+
 Filter options:
-  --newer DATETIME, --older DATETIME        Filter by date and time
-  --filetime               Date-time filtering is based on file's time, not
-                           on Email's Date header (faster)
-  --sender PATTERN         From, Sender, Originator, Return-Path headers
-  --recipient PATTERN      To, Cc, Bcc, Delivered-To headers
-  --subject PATTERN        The Subject header
-  --attachment PATTERN     Search in name of attachments (Email parts)
-  --mime PATTERN/PATTERN   MIME type (type/subtype) of Email parts
-  --header NAME[:PATTERN]  Search in the named header
-  --body QUERY             Body text (plain text and html are supported)
+  --newer, --older DATETIME  Consider Date, Delivery-Date, Received headers
+  --sender PATTERN           From, Sender, Originator, Return-Path, Received
+  --recipient PATTERN        To, Cc, Bcc, Delivered-To, Received
+  --subject PATTERN          Subject, Thread-Topic
+  --attachment PATTERN       Search in name of attachments (Email parts)
+  --mime PATTERN/PATTERN     MIME type (type/subtype) of Email parts
+  --header HEADER[:PATTERN]  Search for arbitrary header name 
+                             and optionally for its content
+  --body FTSEARCH            Body text (plain text and html are supported)
+
 Formats:
-  DATETIME    \"YYYY-mm-dd_HH:MM:SS\" - meant in current time zone
-              You can omit any elements only from the right
-  PATTERN     a) simple string - match case insensitive substring
-              b) \"~REGEX\" - match as regexp if PATTERN starts with tilde
-              PATTERN is optionally prefixed by '!' which inverts filtering
-  QUERY       Fulltext search expression, see Search::Fulltext(3pm)
+  DATETIME    \"YYYY-mm-dd_HH:MM:SS\" - Meant in your timezone.
+              Omitting less significant quantifiers makes them behave wildcard.
+  PATTERN     a) simple string - match substring (see --case)
+              b) \"~REGEX\" - match regexp if PATTERN starts with tilde
+  HEADER      a) simple string - match exact string 
+              b) \"~REGEX\" - match regexp just like PATTERN
+  FTSEARCH    Fulltext search expression, see Search::Fulltext(3pm)
+
+PATTERN and HEADER are optionally prefixed by '!' which inverts results.
+HEADER and --mime matching are always case insensitive.
 ";
 exit 1;
 }
