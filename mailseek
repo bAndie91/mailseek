@@ -85,7 +85,7 @@ sub fmt_structure
 	my $obj = shift;
 	my $indent = shift || 0;
 	my @return;
-	my $part = (" "x$indent) . "+ " . ($obj->{ct}->{type}||$obj->{ct}->{discrete})."/".($obj->{ct}->{subtype}||$obj->{ct}->{composite});
+	my $part = (' 'x$indent) . '+ ' . ($obj->{ct}->{type}||$obj->{ct}->{discrete}).'/'.($obj->{ct}->{subtype}||$obj->{ct}->{composite});
 	if(defined $obj->filename)
 	{
 		my $_ = $obj->filename;
@@ -533,6 +533,8 @@ sub mailseek
 							{
 								push @cont, $cont;
 								$cont = safe_reencode($cont);
+								$cont =~ s/[\r\n]+/ /g;
+								$cont =~ s/[^\x20-\x7E\x80-\xFF]/sprintf '\x%02X', ord $&/eg;
 								print "$hdr: $cont\n";
 							}
 						}
