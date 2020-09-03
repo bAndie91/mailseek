@@ -33,3 +33,7 @@ Formats:
 
 PATTERN and HEADER are optionally prefixed by '!' which inverts results.
 HEADER and --mime matching are always case insensitive.
+
+
+# issues
+Please submit issues via PR to some file `issue/TITLE.txt`.
