@@ -267,13 +267,14 @@ sub between_datetime
 
 sub mailseek
 {
+	my $depth = shift;
 	my @recur;
 	READFILE:
 	for my $file (@_)
 	{
 		if(-d $file)
 		{
-			if($Recursive)
+			if($Recursive or $depth == 0)
 			{
 				my $dirhnd;
 				opendir $dirhnd, $file;
@@ -285,7 +286,7 @@ sub mailseek
 			}
 			next READFILE;
 		}
-
+		
 		if($FilterFileTime and (defined $Filter->{'date'}->{'start'} or defined $Filter->{'date'}->{'end'}))
 		{
 			my($mtime) = ((stat $file)[STAT_MTIME]);
@@ -500,7 +501,7 @@ sub mailseek
 					}
 				}
 			}
-
+			
 			my $matchedby = $FilterName{$search_key};
 			if($search_key eq 'head')
 			{
@@ -519,7 +520,7 @@ sub mailseek
 		{
 			$overall_hits++;
 			print "$file$Separator";
-
+			
 			if($Details)
 			{
 				for my $hdr (sort_header_names_by_display_prio(qw/From To Subject Date/, @found_headers))
@@ -540,7 +541,7 @@ sub mailseek
 						}
 					}
 				}
-
+				
 				if(!$seek_only_in_headers)
 				{
 					if($seek_in_subheaders)
@@ -576,7 +577,7 @@ sub mailseek
 	
 	if(@recur)
 	{
-		mailseek(@recur);
+		mailseek($depth + 1, @recur);
 	}
 }
 
@@ -682,7 +683,7 @@ if(not @ARGV)
 {
 	@ARGV = (".");
 }
-mailseek(@ARGV);
+mailseek(0, @ARGV);
 
 if($overall_hits == 0)
 {
