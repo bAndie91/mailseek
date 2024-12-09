@@ -88,7 +88,7 @@ sub fmt_structure
 	my $part = (' 'x$indent) . '+ ' . ($obj->{ct}->{type}||$obj->{ct}->{discrete}).'/'.($obj->{ct}->{subtype}||$obj->{ct}->{composite});
 	if(defined $obj->filename)
 	{
-		my $_ = $obj->filename;
+		local $_ = $obj->filename;
 		s/[""]/\\$&/g;
 		$part .= "; name=\"$_\"";
 	}
@@ -214,12 +214,6 @@ sub lc_array
 	}
 }
 
-sub every_1st_of_pairs
-{
-	my $n = 0;
-	return grep {++$n % 2} @_;
-}
-
 sub safe_reencode
 {
 	my $str = shift;
@@ -343,7 +337,7 @@ sub mailseek
 		my %matched_parts;
 		my @found_headers;
 
-		for my $search_key (sort {$FilterPrio{substr($a, 0, 4)} <=> $FilterPrio{substr($b, 0, 4)}} grep {defined $Filter->{$_}} keys $Filter)
+		for my $search_key (sort {$FilterPrio{substr($a, 0, 4)} <=> $FilterPrio{substr($b, 0, 4)}} grep {defined $Filter->{$_}} keys %$Filter)
 		{
 			my $this_found = 0;
 			my $search_values = $Filter->{$search_key};
@@ -358,7 +352,7 @@ sub mailseek
 
 			if($search_key eq 'date')
 			{
-				next if(not grep {defined $_} values $search_values);
+				next if(not grep {defined $_} values %$search_values);
 				my @dates;
 				for($Msg->header("Received"), $Msg->header("Date"), $Msg->header("Delivery-Date"))
 				{
@@ -427,7 +421,7 @@ sub mailseek
 					}
 					when('head')
 					{
-						for my $hname (every_1st_of_pairs @{$Msg->{header}->{headers}})
+						for my $hname (keys %{$Msg->{header}->{headers}})
 						{
 							if(is_match($hname, $head_pattern, MATCH_FULL, MATCH_CASE_FORCE_INSENSITIVE))
 							{
