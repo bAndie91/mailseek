@@ -1,3 +1,4 @@
+```
 Usage: ./mailseek [options] [files]
 Options:
   --no-recursive   Do not dive into directories, default is recursive
@@ -33,7 +34,11 @@ Formats:
 
 PATTERN and HEADER are optionally prefixed by '!' which inverts results.
 HEADER and --mime matching are always case insensitive.
+```
 
+# Project issues, bugs, feature requests, ideas
 
-# issues
-Please submit issues via PR to some file `issue/TITLE.txt`.
+1. clone repo
+2. use [git-bug](https://github.com/git-bug/git-bug) to open a new ticket in this repo
+3. find one or more person in the commit history to make contact with
+4. send the URL of your git clone to them (via email or other channel), and request them to pull (`git-bug` issues and/or branches as well) from you
