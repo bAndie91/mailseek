@@ -461,7 +461,7 @@ sub mailseek
 						}
 						if(defined $ftsearch)
 						{
-							%matched_parts = @{$ftsearch->search_snippets($search_value)};
+							%matched_parts = @{$ftsearch->search($search_value)};
 							$this_found = scalar keys %matched_parts > 0;
 						}
 					}
